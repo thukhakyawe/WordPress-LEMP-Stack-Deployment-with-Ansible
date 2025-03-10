@@ -1,0 +1,185 @@
+---
+- name: Deploy WordPress on LEMP stack
+  hosts: webservers
+  become: true
+  vars:
+    mysql_root_password: "your_mysql_root_password"
+    mysql_db_name: "wordpress"
+    mysql_user: "wp_user"
+    mysql_password: "your_wp_password"
+    wordpress_url: "https://wordpress.org/latest.tar.gz"
+    wordpress_root: "/var/www/wordpress"
+
+  tasks:
+    - name: Install debconf-utils
+      apt:
+        name: debconf-utils
+        state: present
+      become: true
+
+    - name: Update and install required packages
+      apt:
+        update_cache: yes
+        name:
+          - nginx
+          - mysql-server
+          - php-fpm
+          - php-mysql
+          - php-cli
+          - php-curl
+          - php-gd
+          - php-mbstring
+          - php-xml
+          - php-xmlrpc
+          - unzip
+          - curl
+        state: present
+      become: true
+
+    - name: Install Python MySQL dependencies
+      apt:
+        name: python3-pymysql
+        state: present
+      become: true
+
+    - name: Start and enable Nginx & MySQL
+      systemd:
+        name: "{{ item }}"
+        state: started
+        enabled: yes
+      loop:
+        - nginx
+        - mysql
+      become: true
+
+    # Block for MySQL and WordPress setup
+    - block:
+        - name: Set MySQL root password
+          mysql_user:
+            name: root
+            password: "{{ mysql_root_password }}"
+            state: present
+            login_user: root
+            login_password: "{{ mysql_root_password }}"
+          become: true
+
+        - name: Create WordPress database
+          mysql_db:
+            name: "{{ mysql_db_name }}"
+            state: present
+            login_user: root
+            login_password: "{{ mysql_root_password }}"
+          become: true
+
+        - name: Create WordPress user in MySQL
+          mysql_user:
+            name: "{{ mysql_user }}"
+            password: "{{ mysql_password }}"
+            priv: "{{ mysql_db_name }}.*:ALL"
+            state: present
+            login_user: root
+            login_password: "{{ mysql_root_password }}"
+          become: true
+
+        - name: Download and extract WordPress
+          get_url:
+            url: "{{ wordpress_url }}"
+            dest: "/tmp/wordpress.tar.gz"
+          become: true
+
+        - name: Extract WordPress
+          ansible.builtin.unarchive:
+            src: "/tmp/wordpress.tar.gz"
+            dest: "/var/www/"
+            remote_src: yes
+          become: true
+
+        - name: Set ownership and permissions
+          file:
+            path: "{{ wordpress_root }}"
+            owner: www-data
+            group: www-data
+            mode: "0755"
+            recurse: yes
+          become: true
+
+        - name: Configure Nginx for WordPress
+          template:
+            src: wordpress_nginx.conf.j2
+            dest: "/etc/nginx/sites-available/wordpress"
+          become: true
+
+        - name: Enable WordPress site
+          file:
+            src: "/etc/nginx/sites-available/wordpress"
+            dest: "/etc/nginx/sites-enabled/wordpress"
+            state: link
+          become: true
+
+        - name: Remove default Nginx configuration
+          file:
+            path: "/etc/nginx/sites-enabled/default"
+            state: absent
+          become: true
+
+        - name: Restart Nginx
+          systemd:
+            name: nginx
+            state: restarted
+          become: true
+
+        - name: Configure PHP settings
+          lineinfile:
+            path: "/etc/php/8.3/fpm/php.ini"
+            regexp: "^upload_max_filesize"
+            line: "upload_max_filesize = 64M"
+          become: true
+
+        - name: Restart PHP-FPM
+          systemd:
+            name: php8.3-fpm
+            state: restarted
+          become: true
+
+      rescue:
+        - name: Undo changes - Remove WordPress and MySQL setup
+          block:
+            - name: Remove WordPress files
+              file:
+                path: "{{ wordpress_root }}"
+                state: absent
+              become: true
+
+            - name: Drop WordPress database
+              mysql_db:
+                name: "{{ mysql_db_name }}"
+                state: absent
+                login_user: root
+                login_password: "{{ mysql_root_password }}"
+              become: true
+
+            - name: Remove WordPress user from MySQL
+              mysql_user:
+                name: "{{ mysql_user }}"
+                state: absent
+                login_user: root
+                login_password: "{{ mysql_root_password }}"
+              become: true
+
+            - name: Stop and disable Nginx & MySQL
+              systemd:
+                name: "{{ item }}"
+                state: stopped
+                enabled: no
+              loop:
+                - nginx
+                - mysql
+              become: true
+
+      always:
+        - name: Clean up temporary files
+          file:
+            path: "/tmp/wordpress.tar.gz"
+            state: absent
+          become: true
+
